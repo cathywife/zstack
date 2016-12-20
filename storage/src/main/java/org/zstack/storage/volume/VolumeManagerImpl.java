@@ -506,6 +506,12 @@ public class VolumeManagerImpl extends AbstractService implements VolumeManager,
         acntMgr.createAccountResourceRef(msg.getSession().getAccountUuid(), vo.getUuid(), VolumeVO.class);
         tagMgr.createTagsFromAPICreateMessage(msg, vo.getUuid(), VolumeVO.class.getSimpleName());
 
+        List<CreateVolumeExtensionPoint> createVolumeExts;
+        createVolumeExts = pluginRgty.getExtensionList(CreateVolumeExtensionPoint.class);
+        for (CreateVolumeExtensionPoint ext : createVolumeExts) {
+            vo = ext.beforeCreateVolume(vo);
+        }
+
         vo = dbf.persistAndRefresh(vo);
 
         if (msg.getPrimaryStorageUuid() == null) {

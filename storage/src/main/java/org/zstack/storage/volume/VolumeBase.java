@@ -67,7 +67,8 @@ import static org.zstack.utils.CollectionDSL.list;
 @Configurable(preConstruction = true, autowire = Autowire.BY_TYPE)
 public class VolumeBase implements Volume {
     private static final CLogger logger = Utils.getLogger(VolumeBase.class);
-
+    protected String syncThreadId;
+    protected VolumeVO self;
     @Autowired
     private CloudBus bus;
     @Autowired
@@ -86,9 +87,6 @@ public class VolumeBase implements Volume {
     private PluginRegistry pluginRgty;
     @Autowired
     private VolumeDeletionPolicyManager deletionPolicyMgr;
-
-    protected String syncThreadId;
-    protected VolumeVO self;
 
     public VolumeBase(VolumeVO vo) {
         self = vo;
@@ -641,6 +639,20 @@ public class VolumeBase implements Volume {
                         public void run(final FlowTrigger trigger, Map data) {
                             DetachDataVolumeFromVmMsg dmsg = new DetachDataVolumeFromVmMsg();
                             dmsg.setVolume(getSelfInventory());
+                            if (getSelfInventory().isShareable()) {
+                                List<GetVolumeAttachedVmUuidsExtensionPoint> exts = pluginRgty.getExtensionList(
+                                        GetVolumeAttachedVmUuidsExtensionPoint.class);
+                                if (exts.size() == 1) {
+                                    List<String> vmUuids = exts.get(0).GetVolumeAttachedVmUuids(getSelfInventory());
+                                    if (vmUuids.size() > 0) {
+                                        throw new OperationFailureException(errf.stringToOperationError(
+                                                "you need detach all vm for shareable volume manually before delete."));
+                                    }
+                                } else if (exts.size() > 1) {
+                                    throw new OperationFailureException(errf.stringToOperationError(
+                                            "there should not be more than one GetVolumeAttachedVmUuidsExtensionPoint implementation."));
+                                }
+                            }
                             bus.makeTargetServiceIdByResourceUuid(dmsg, VmInstanceConstant.SERVICE_ID, dmsg.getVmInstanceUuid());
                             bus.send(dmsg, new CloudBusCallBack(trigger) {
                                 @Override
@@ -848,11 +860,6 @@ public class VolumeBase implements Volume {
         ret.put(Capability.MigrationToOtherPrimaryStorage.toString(), psType.isSupportVolumeMigrationToOtherPrimaryStorage());
     }
 
-    class VolumeSize {
-        long size;
-        long actualSize;
-    }
-
     private void syncVolumeVolumeSize(final ReturnValueCompletion<VolumeSize> completion) {
         SyncVolumeSizeOnPrimaryStorageMsg smsg = new SyncVolumeSizeOnPrimaryStorageMsg();
         smsg.setPrimaryStorageUuid(self.getPrimaryStorageUuid());
@@ -1037,7 +1044,6 @@ public class VolumeBase implements Volume {
         bus.publish(evt);
     }
 
-
     @Transactional(readOnly = true)
     private List<VmInstanceVO> getCandidateVmForAttaching(String accountUuid) {
         List<String> vmUuids = acntMgr.getResourceUuidsCanAccessByAccount(accountUuid, VmInstanceVO.class);
@@ -1133,6 +1139,11 @@ public class VolumeBase implements Volume {
                             evt.setErrorCode(reply.getError());
                         }
 
+                        if (self.isShareable()) {
+                            self.setVmInstanceUuid(null);
+                            dbf.update(self);
+                        }
+
                         bus.publish(evt);
                         chain.next();
                     }
@@ -1158,7 +1169,15 @@ public class VolumeBase implements Volume {
             public void run(SyncTaskChain chain) {
                 DetachDataVolumeFromVmMsg dmsg = new DetachDataVolumeFromVmMsg();
                 dmsg.setVolume(getSelfInventory());
-                bus.makeTargetServiceIdByResourceUuid(dmsg, VmInstanceConstant.SERVICE_ID, dmsg.getVmInstanceUuid());
+                String vmUuid;
+                if (msg.getVmUuid() != null) {
+                    vmUuid = msg.getVmUuid();
+                } else {
+                    vmUuid = getSelfInventory().getVmInstanceUuid();
+                }
+                dmsg.setVmInstanceUuid(vmUuid);
+
+                bus.makeTargetServiceIdByResourceUuid(dmsg, VmInstanceConstant.SERVICE_ID, vmUuid);
                 bus.send(dmsg, new CloudBusCallBack(msg, chain) {
                     @Override
                     public void run(MessageReply reply) {
@@ -1382,5 +1401,10 @@ public class VolumeBase implements Volume {
         APIChangeVolumeStateEvent evt = new APIChangeVolumeStateEvent(msg.getId());
         evt.setInventory(inv);
         bus.publish(evt);
+    }
+
+    class VolumeSize {
+        long size;
+        long actualSize;
     }
 }
